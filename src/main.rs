@@ -206,12 +206,11 @@ fn get_heap(size: usize, head: *mut *mut Heap) -> Option<*mut Heap> {
 }
 
 fn malloc(size: usize) -> *const c_void {
-    let heap_lock = HEAP_ANCHOR.lock().unwrap();
+    let mut heap_lock = HEAP_ANCHOR.lock().unwrap();
     let size = align(8, size);
     if size > SMALL_HEAP_ALLOCATION_SIZE {
         let ptr = mem_map(size + Block::size()).unwrap() as *mut Block;
         unsafe { (*ptr).data_size = size };
-        println!("{:?}", unsafe { *ptr });
         return unsafe {block_shift!(ptr) as *const c_void};
     }
 
@@ -220,9 +219,9 @@ fn malloc(size: usize) -> *const c_void {
         None => {
             let new_heap = create_heap(size) as *mut Heap;
             unsafe {
-                (*new_heap).next = HEAP_ANCHOR;
-                (*HEAP_ANCHOR).previous = new_heap;
-                HEAP_ANCHOR = new_heap as *mut Heap;
+                (*new_heap).next = heap_lock.heap;
+                (*heap_lock.heap).previous = new_heap;
+                heap_lock.heap = new_heap as *mut Heap;
             }
             new_heap
         }
@@ -273,25 +272,23 @@ fn malloc(size: usize) -> *const c_void {
 }
 
 fn print_heap() {
-    unsafe {
-        let mut current_heap = HEAP_ANCHOR;
-
-        while !current_heap.is_null() {
-            println!("==== Heap ====\n {:?}", *current_heap);
-            println!("====== blocks ====");
-
-            let mut curr_block = heap_shift!(current_heap) as *mut Block;
-            while !curr_block.is_null() {
-                println!("{:?}", curr_block.read());
-                curr_block = curr_block.read().next as *mut Block;
-            }
-            current_heap = (*current_heap).next
-        }
-    }
+    // unsafe {
+    //     let mut current_heap = HEAP_ANCHOR;
+    //     while !current_heap.is_null() {
+    //         println!("==== Heap ====\n {:?}", *current_heap);
+    //         println!("====== blocks ====");
+    //         let mut curr_block = heap_shift!(current_heap) as *mut Block;
+    //         while !curr_block.is_null() {
+    //             println!("{:?}", curr_block.read());
+    //             curr_block = curr_block.read().next as *mut Block;
+    //         }
+    //         current_heap = (*current_heap).next
+    //     }
+    // }
 }
 
-fn parent_heap(block: *const c_void) -> Option<*mut Heap> {
-    let mut curr_heap = unsafe { HEAP_ANCHOR };
+fn parent_heap(block: *const c_void, head: *mut Heap) -> Option<*mut Heap> {
+    let mut curr_heap = head;
     while !curr_heap.is_null() {
         let mut curr = unsafe{ heap_shift!(curr_heap) as *mut Block };
         while unsafe { curr_heap.read() }.block_count > 0 && !curr.is_null() {
@@ -322,7 +319,8 @@ fn merge_right(block: *mut Block, heap: *mut Heap) {
     }
 }
 
-fn merge_left(block: *mut Block, heap: *mut Heap) {
+fn merge_left(block: *mut Block, heap_handle: &mut HeapHandle, heap: *mut Heap) {
+    //let mut heap = heap_handle.heap;
     unsafe {
         if !(*block).previous.is_null() {
             if (*(*block).previous).free {
@@ -341,37 +339,40 @@ fn merge_left(block: *mut Block, heap: *mut Heap) {
         if heap.read().block_count == 1 {
             let block = heap_shift!(heap) as *const Block;
             if block.read().free {
-                if !(*heap).next.is_null() {
+                //if !(*heap).next.is_null() {
                     if !(*heap).previous.is_null() {
                         (*(*heap).previous).next = (*heap).next;
                     }
-                }
-                if !(*heap).previous.is_null() {
+                //}
+                //if !(*heap).previous.is_null() {
                     if !(*heap).next.is_null() {
                         (*(*heap).next).previous = (*heap).previous;
                     }
+                //}
+                if heap != heap_handle.heap {
+                    mem_unmap(heap as *const c_void, heap.read().total_size).unwrap();
                 }
-                if heap == HEAP_ANCHOR {
-                    HEAP_ANCHOR = (*heap).next
-                }
-                mem_unmap(heap as *const c_void, heap.read().total_size).unwrap();
             }
         }
     }
 }
 
 fn free(ptr: *const c_void) {
-    let block_ptr = unsafe{ block_unshift!(ptr) as *mut Block };
-    if unsafe { block_ptr.read().data_size > SMALL_HEAP_ALLOCATION_SIZE } {
-        mem_unmap(block_ptr as *const c_void, unsafe {
-            block_ptr.read().data_size + Block::size()
-        })
-        .unwrap();
-        return;
-    }
-    let heap = match parent_heap(ptr) {
+    let mut heap_lock = HEAP_ANCHOR.lock().unwrap();
+    let heap = match parent_heap(ptr, heap_lock.heap) {
         Some(h) => h,
-        None => panic!("invalid pointer"),
+        None => {
+            let block_ptr = unsafe{ block_unshift!(ptr) as *mut Block };
+            if unsafe { (*block_ptr).data_size > SMALL_HEAP_ALLOCATION_SIZE } {
+                mem_unmap(block_ptr as *const c_void, unsafe {
+                    block_ptr.read().data_size + Block::size()
+                })
+                .unwrap();
+                return;
+            } else {
+                panic!("invalid pointer")
+            }
+        },
     };
     let block = unsafe{ block_unshift!(ptr) as *mut Block };
     if unsafe { block.read().free } {
@@ -382,20 +383,23 @@ fn free(ptr: *const c_void) {
         (*heap).free_size += (*block).data_size + Block::size();
     }
     merge_right(block, heap);
-    merge_left(block, heap);
+    merge_left(block, &mut heap_lock, heap);
 }
 
 fn main() {
-    let ptr = malloc(5);
-    //let ptr = malloc(150000);
-    free(ptr as *mut c_void);
+    //let ptr = malloc(15);
+    //let ptr = malloc(10);
+    //assert!(ptr.is_null());
+    //free(ptr as *mut c_void);
+    //free(ptr as *mut c_void);
+
     //free(ptr as *mut c_void);
 
     let ptr1 = malloc(10);
-    let ptr2 = malloc(10);
-    let ptr3 = malloc(10);
-    let ptr4 = malloc(10);
-    let ptr5 = malloc(10);
+    let ptr2 = malloc(100);
+    let ptr3 = malloc(450);
+    let ptr4 = malloc(1000);
+    let ptr5 = malloc(1);
 
     //let ptr3 = malloc(10);
     //let ptr4 = malloc(10);
@@ -410,7 +414,7 @@ fn main() {
     //let ptr = unsafe{block_unshift!(ptr3)} as *const Block;
     //println!("*{:?}", unsafe{HEAP_ANCHOR.read()});
 
-    print_heap();
+    //print_heap();
 }
 
 // 7461875
@@ -418,13 +422,37 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use crate::{free, malloc};
+    //lazy_static::lazy_static!{
+    //    static ref HEAP_ANCHOR: Mutex<HeapHandle> = Mutex::new(
+    //        HeapHandle { heap: 0 as *mut Heap }
+    //    );
+    //}
+    use std::{os::raw::c_void, mem};
+
+    use crate::{free, malloc, Block};
 
     #[test]
+    fn behavior() {
+        let ptr = malloc(10);
+        assert!(!ptr.is_null());
+        let block = unsafe{block_unshift!(ptr) } as *mut Block;
+        assert!(unsafe{ (*block).data_size }  == 16);
+
+    }
+
+    //#[test]
     #[should_panic]
     fn double_free() {
         let ptr = malloc(10);
-        //free(ptr);
-        //free(ptr)
+        assert!(!ptr.is_null());
+        free(ptr);
+        free(ptr)
+    }
+
+    //#[test]
+    #[should_panic]
+    fn ivalid_free() {
+        let ptr = 0 as *const c_void;
+        free(ptr);
     }
 }
