@@ -1,9 +1,10 @@
 use std::{
     ffi::c_void,
     mem::{self, discriminant},
-    ptr::{self, null},
+    ptr::{addr_of, addr_of_mut, null}, sync::Mutex,
 };
 
+use lazy_static::lazy_static;
 use mmap::{mem_map, mem_unmap};
 
 mod mmap;
@@ -55,6 +56,9 @@ struct Heap {
     block_count: usize,
 }
 
+unsafe impl Send for Heap{}
+unsafe  impl Sync for Heap{}
+
 impl Heap {
     fn new(size: usize) -> Self {
         let gp: HeapGroup = size.into();
@@ -100,29 +104,43 @@ impl Block {
 
 macro_rules! block_shift {
     ($ptr: expr) => {
-        unsafe { (($ptr) as *mut std::ffi::c_void).add(mem::size_of::<Block>()) }
+        (($ptr) as *mut std::ffi::c_void).add(mem::size_of::<Block>())
     };
 }
 
 macro_rules! block_unshift {
     ($ptr: expr) => {
-        unsafe { (($ptr) as *mut std::ffi::c_void).sub(mem::size_of::<Block>()) }
+        (($ptr) as *mut std::ffi::c_void).sub(mem::size_of::<Block>())
     };
 }
 
 macro_rules! heap_shift {
     ($ptr: expr) => {
-        unsafe { (($ptr) as *mut std::ffi::c_void).add(mem::size_of::<Heap>()) }
+        (($ptr) as *mut std::ffi::c_void).add(mem::size_of::<Heap>())
     };
 }
 
+#[allow(unused_macros)]
 macro_rules! heap_unshift {
     ($ptr: expr) => {
-        unsafe { (($ptr) as *mut std::ffi::c_void).sub(mem::size_of::<Heap>()) }
+        (($ptr) as *mut std::ffi::c_void).sub(mem::size_of::<Heap>())
     };
 }
 
-static mut HEAP_ANCHOR: *mut Heap = 0 as *mut Heap;
+struct HeapHandle{
+    heap: *mut Heap
+}
+
+unsafe impl Send for HeapHandle{}
+unsafe impl Sync for HeapHandle{}
+
+lazy_static!{
+    static ref HEAP_ANCHOR: Mutex<HeapHandle> = Mutex::new(
+        HeapHandle { heap: 0 as *mut Heap }
+    );
+}
+
+//static mut HEAP_ANCHOR : *mut Heap = 0 as *mut Heap;
 
 fn create_heap(size: usize) -> *const Heap {
     let header = Heap::new(size);
@@ -147,9 +165,9 @@ fn align(to: usize, from: usize) -> usize {
     return (from + to - 1) & !(to - 1);
 }
 
-fn get_free_block(size: usize) -> Option<*mut Block> {
+fn get_free_block(size: usize, heap: *const Heap) -> Option<*mut Block> {
     unsafe {
-        let mut curr_block = heap_shift!(HEAP_ANCHOR) as *mut Block;
+        let mut curr_block = heap_shift!(heap) as *mut Block;
         loop {
             if curr_block.read().free && curr_block.read().data_size >= size {
                 return Some(curr_block);
@@ -165,15 +183,15 @@ fn get_free_block(size: usize) -> Option<*mut Block> {
     }
 }
 
-fn get_heap(size: usize) -> Option<*mut Heap> {
+fn get_heap(size: usize, head: *mut *mut Heap) -> Option<*mut Heap> {
     let s = size;
-    if unsafe { HEAP_ANCHOR }.is_null() {
+    if unsafe { (*head).is_null() } {
         unsafe {
-            HEAP_ANCHOR = create_heap(size) as *mut Heap;
+            (*head) = create_heap(size) as *mut Heap;
         }
     }
     let heap_group: HeapGroup = s.into();
-    let mut first_heap = unsafe { HEAP_ANCHOR };
+    let mut first_heap = unsafe { *head };
     loop {
         if discriminant(&unsafe { first_heap.read() }.group) == discriminant(&heap_group)
             && unsafe { first_heap.read() }.free_size >= s + Block::size()
@@ -188,15 +206,16 @@ fn get_heap(size: usize) -> Option<*mut Heap> {
 }
 
 fn malloc(size: usize) -> *const c_void {
+    let heap_lock = HEAP_ANCHOR.lock().unwrap();
     let size = align(8, size);
     if size > SMALL_HEAP_ALLOCATION_SIZE {
         let ptr = mem_map(size + Block::size()).unwrap() as *mut Block;
         unsafe { (*ptr).data_size = size };
         println!("{:?}", unsafe { *ptr });
-        return block_shift!(ptr) as *const c_void;
+        return unsafe {block_shift!(ptr) as *const c_void};
     }
 
-    let suitable_heap = match get_heap(size) {
+    let suitable_heap = match get_heap(size, unsafe{ addr_of_mut!(heap_lock.heap) }) {
         Some(h) => h,
         None => {
             let new_heap = create_heap(size) as *mut Heap;
@@ -210,15 +229,15 @@ fn malloc(size: usize) -> *const c_void {
     };
     let mut block_header = Block::new(size);
     if unsafe { suitable_heap.read().block_count } == 0 {
-        let last_block = heap_shift!(suitable_heap) as *mut Block;
+        let last_block = unsafe{ heap_shift!(suitable_heap) as *mut Block };
         unsafe {
             (*suitable_heap).block_count += 1;
             (*suitable_heap).free_size -= block_header.data_size + Block::size();
             last_block.write(block_header);
         }
-        block_shift!(last_block)
+        unsafe { block_shift!(last_block) }
     } else {
-        if let Some(free_block) = get_free_block(size) {
+        if let Some(free_block) = get_free_block(size, suitable_heap) {
             if unsafe { free_block.read().data_size } == size {
                 return free_block as *const c_void;
             } else {
@@ -235,10 +254,10 @@ fn malloc(size: usize) -> *const c_void {
 
                     (*suitable_heap).block_count += 1;
                 }
-                return block_shift!(free_block) as *const c_void;
+                return unsafe { block_shift!(free_block) as *const c_void };
             }
         } else {
-            let last_block = get_last_block(heap_shift!(suitable_heap) as *mut Block);
+            let last_block = get_last_block(unsafe{ heap_shift!(suitable_heap) as *mut Block}) ;
             unsafe {
                 let new_block =
                     block_shift!(last_block).add(last_block.read().data_size) as *mut Block;
@@ -271,12 +290,12 @@ fn print_heap() {
     }
 }
 
-fn parent_heap(mut block: *const c_void) -> Option<*mut Heap> {
+fn parent_heap(block: *const c_void) -> Option<*mut Heap> {
     let mut curr_heap = unsafe { HEAP_ANCHOR };
     while !curr_heap.is_null() {
-        let mut curr = heap_shift!(curr_heap) as *mut Block;
+        let mut curr = unsafe{ heap_shift!(curr_heap) as *mut Block };
         while unsafe { curr_heap.read() }.block_count > 0 && !curr.is_null() {
-            let ptr = block_shift!(curr);
+            let ptr = unsafe { block_shift!(curr) };
             if ptr == block as *mut c_void {
                 return Some(curr_heap);
             }
@@ -342,7 +361,7 @@ fn merge_left(block: *mut Block, heap: *mut Heap) {
 }
 
 fn free(ptr: *const c_void) {
-    let block_ptr = block_unshift!(ptr) as *mut Block;
+    let block_ptr = unsafe{ block_unshift!(ptr) as *mut Block };
     if unsafe { block_ptr.read().data_size > SMALL_HEAP_ALLOCATION_SIZE } {
         mem_unmap(block_ptr as *const c_void, unsafe {
             block_ptr.read().data_size + Block::size()
@@ -350,12 +369,11 @@ fn free(ptr: *const c_void) {
         .unwrap();
         return;
     }
-
     let heap = match parent_heap(ptr) {
         Some(h) => h,
         None => panic!("invalid pointer"),
     };
-    let block = block_unshift!(ptr) as *mut Block;
+    let block = unsafe{ block_unshift!(ptr) as *mut Block };
     if unsafe { block.read().free } {
         panic!("double free detected");
     }
@@ -369,24 +387,24 @@ fn free(ptr: *const c_void) {
 
 fn main() {
     let ptr = malloc(5);
-    let ptr = malloc(150000);
+    //let ptr = malloc(150000);
     free(ptr as *mut c_void);
     //free(ptr as *mut c_void);
 
-    //let ptr1 = malloc(10);
-    //let ptr2 = malloc(10);
-    //let ptr3 = malloc(10);
-    //let ptr4 = malloc(10);
-    //let ptr5 = malloc(10);
+    let ptr1 = malloc(10);
+    let ptr2 = malloc(10);
+    let ptr3 = malloc(10);
+    let ptr4 = malloc(10);
+    let ptr5 = malloc(10);
 
     //let ptr3 = malloc(10);
     //let ptr4 = malloc(10);
 
-    //free(ptr4 as *mut c_void);
-    //free(ptr3 as *mut c_void);
-    //free(ptr5 as *mut c_void);
-    //free(ptr2 as *mut c_void);
-    //free(ptr1 as *mut c_void);
+    free(ptr4 as *mut c_void);
+    free(ptr3 as *mut c_void);
+    free(ptr5 as *mut c_void);
+    free(ptr2 as *mut c_void);
+    free(ptr1 as *mut c_void);
 
     //println!("{:?}", align(16, 15));
     //let ptr = unsafe{block_unshift!(ptr3)} as *const Block;
@@ -398,3 +416,15 @@ fn main() {
 // 7461875
 // 9250373
 
+#[cfg(test)]
+mod tests {
+    use crate::{free, malloc};
+
+    #[test]
+    #[should_panic]
+    fn double_free() {
+        let ptr = malloc(10);
+        //free(ptr);
+        //free(ptr)
+    }
+}

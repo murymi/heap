@@ -47,6 +47,7 @@ pub fn mem_unmap(add: *const c_void, length: usize) -> Result<(), ErrorKind> {
     }
 }
 
+#[allow(dead_code)]
 pub fn get_page_size() -> usize {
     unsafe { getpagesize() }
 }
