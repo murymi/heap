@@ -387,46 +387,22 @@ fn free(ptr: *const c_void) {
 }
 
 fn main() {
-    //let ptr = malloc(15);
-    //let ptr = malloc(10);
-    //assert!(ptr.is_null());
-    //free(ptr as *mut c_void);
-    //free(ptr as *mut c_void);
-
-    //free(ptr as *mut c_void);
-
     let ptr1 = malloc(10);
     let ptr2 = malloc(100);
     let ptr3 = malloc(450);
     let ptr4 = malloc(1000);
     let ptr5 = malloc(1);
 
-    //let ptr3 = malloc(10);
-    //let ptr4 = malloc(10);
-
     free(ptr4 as *mut c_void);
     free(ptr3 as *mut c_void);
     free(ptr5 as *mut c_void);
     free(ptr2 as *mut c_void);
     free(ptr1 as *mut c_void);
-
-    //println!("{:?}", align(16, 15));
-    //let ptr = unsafe{block_unshift!(ptr3)} as *const Block;
-    //println!("*{:?}", unsafe{HEAP_ANCHOR.read()});
-
-    //print_heap();
 }
 
-// 7461875
-// 9250373
 
 #[cfg(test)]
 mod tests {
-    //lazy_static::lazy_static!{
-    //    static ref HEAP_ANCHOR: Mutex<HeapHandle> = Mutex::new(
-    //        HeapHandle { heap: 0 as *mut Heap }
-    //    );
-    //}
     use std::{os::raw::c_void, mem};
 
     use crate::{free, malloc, Block};
@@ -440,7 +416,7 @@ mod tests {
 
     }
 
-    //#[test]
+    #[test]
     #[should_panic]
     fn double_free() {
         let ptr = malloc(10);
@@ -449,7 +425,7 @@ mod tests {
         free(ptr)
     }
 
-    //#[test]
+    #[test]
     #[should_panic]
     fn ivalid_free() {
         let ptr = 0 as *const c_void;
